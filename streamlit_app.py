@@ -1,139 +1,128 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import google.generativeai as genai
 from datetime import datetime
 
-# 1. 網頁基本設定
-st.set_page_config(page_title="台股AI飆股預測系統", layout="wide")
+# --- 1. 核心設定 ---
+# 請在此輸入你的 Gemini API Key
+GOOGLE_API_KEY = "AIzaSyAJn-wmeP1jAB8eyScT4Ei2Hie1Dx-8yHU" 
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
-st.title("📈 台股 AI 飆股篩選與價值預測系統")
-st.markdown("""
-此系統已針對 **AI 高成長股** 與 **短期爆發型態** 進行優化：
-* **推薦短期飆股**：自動篩選「成交量 > 2萬張」、「K線多頭排列」且「股價突破近期高點」的標的。
-* **中文名稱優化**：自動轉換台股中文簡稱。
-* **高估值邏輯**：採用 35 倍 AI 溢價本益比，更貼近目前台積電、鴻海等行情。
-""")
+st.set_page_config(page_title="台股AI導航與新聞預測", layout="wide")
 
-# --- 側邊欄設定 ---
-with st.sidebar:
-    st.header("⚙️ 篩選參數")
-    vol_limit = st.number_input("最低成交量門檻 (張)", value=20000)
-    
-    # 擴大熱門股池
-    taiwan_stocks = [
-        "2330.TW", "2317.TW", "2303.TW", "2454.TW", "2382.TW", "3231.TW", 
-        "2357.TW", "2301.TW", "2376.TW", "6669.TW", "2603.TW", "2609.TW", 
-        "2618.TW", "2881.TW", "2882.TW", "2886.TW", "2409.TW", "3481.TW",
-        "1513.TW", "1605.TW", "2313.TW", "2360.TW", "3034.TW", "3711.TW",
-        "2610.TW", "2615.TW", "2344.TW", "2449.TW", "1504.TW", "1519.TW"
-    ]
+st.title("🛡️ 台股 AI 飆股導航與全自動新聞預測系統")
 
-# --- 核心運算邏輯 ---
-def analyze_market():
+# --- 2. AI 財經新聞整理與分析功能 ---
+def get_ai_market_intelligence():
+    prompt = """
+    你是專業的財經分析師。請整理今日（2026年1月）最新的全球財經新聞、美股趨勢與台股消息：
+    1. 總結 3 條最重要的世界新聞。
+    2. 分析哪些題材（例如 AI、半導體、航運等）目前被看好。
+    3. 分析哪些新聞可能導致哪些股票或板塊下跌（風險提示）。
+    4. 推薦 3-5 個今日最值得關注的台股題材關鍵字。
+    請用繁體中文回答，內容要精簡，適合手機閱讀。
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except:
+        return "⚠️ AI 新聞連線暫時失敗，請檢查 API Key 是否正確。"
+
+# --- 3. 數據運算邏輯 ---
+def run_full_scan(vol_limit, stock_list):
     results = []
-    progress_bar = st.progress(0, text="大數據掃描中...")
+    progress_bar = st.progress(0, text="大數據與 AI 運算中...")
     
-    for i, symbol in enumerate(taiwan_stocks):
+    for i, symbol in enumerate(stock_list):
         try:
             ticker = yf.Ticker(symbol)
-            # 獲取半年歷史數據
             df = ticker.history(period="180d")
-            if df.empty or len(df) < 60:
-                continue
+            if df.empty or len(df) < 60: continue
             
             info = ticker.info
-            current_price = df['Close'].iloc[-1]
-            volume_shares = df['Volume'].iloc[-1] / 1000  # 換算張數
+            current_p = df['Close'].iloc[-1]
+            vol_shares = df['Volume'].iloc[-1] / 1000
             
-            # --- 基本門檻過濾 ---
-            if volume_shares < vol_limit:
-                continue
-
-            # --- 計算技術指標 ---
-            df['MA5'] = df['Close'].rolling(5).mean()
-            df['MA10'] = df['Close'].rolling(10).mean()
-            df['MA20'] = df['Close'].rolling(20).mean()
-            df['MA60'] = df['Close'].rolling(60).mean()
+            if vol_shares < vol_limit: continue
             
-            # 飆股 K 線型態判斷：
-            # 1. 價格 > MA5 > MA20 (短線極強)
-            # 2. 股價站上 MA60 (長線支撐)
-            # 3. 今日收紅 K (收盤價 > 開盤價)
-            is_strong_k = (current_price > df['MA5'].iloc[-1] > df['MA20'].iloc[-1]) and \
-                          (current_price > df['MA60'].iloc[-1]) and \
-                          (df['Close'].iloc[-1] > df['Open'].iloc[-1])
+            # K線指標
+            ma5 = df['Close'].rolling(5).mean().iloc[-1]
+            ma20 = df['Close'].rolling(20).mean().iloc[-1]
+            ma60 = df['Close'].rolling(60).mean().iloc[-1]
+            high_20 = df['High'].iloc[-21:-1].max()
+            low_20 = df['Low'].iloc[-21:-1].min()
             
-            # 短線對稱測幅目標
-            high_20d = df['High'].iloc[-21:-1].max()
-            low_20d = df['Low'].iloc[-21:-1].min()
-            short_target = current_price + (current_price - low_20d)
-
-            # 長線 AI 溢價估值 (35倍 PE)
+            # 飆股 K 線判斷 (突破 20 日高點 + 均線多頭)
+            is_surging = (current_p >= high_20) and (current_p > ma5 > ma20)
+            
+            # 預期價計算 (AI 高成長溢價)
+            short_t = current_p + (current_p - low_20)
             eps = info.get('trailingEps', 0)
-            if eps <= 0:
-                long_target = current_price * 1.3
-            else:
-                pe_ratio = max(info.get('forwardPE', 35), 35)
-                long_target = eps * pe_ratio * 1.15 # 加上成長加權
+            long_t = eps * 35 * 1.15 if eps > 0 else current_p * 1.3
+            if long_t < current_p: long_t = current_p * 1.25 # 保底溢價
 
-            # 修正：避免財報落後導致預期過低
-            if long_target < current_price:
-                long_target = current_price * 1.25
-
-            # --- 中文名稱處理 ---
-            raw_name = info.get('shortName', symbol)
-            # 移除常見的英文後綴，讓手機版更易讀
-            display_name = raw_name.replace("TAIWAN SEMICONDUCTOR MANUFAC", "台積電")\
-                                   .replace("HON HAI PRECISION IND", "鴻海")\
-                                   .replace("MEDIATEK INC", "聯發科")\
-                                   .replace("QUANTA COMPUTER", "廣達")\
-                                   .replace("CHUNGHWA TELECOM", "中華電")\
-                                   .replace("UNITED MICROELECTRONICS", "聯電")\
-                                   .replace("EVERGREEN MARINE", "長榮")\
-                                   .replace("YANG MING MARINE", "陽明")\
-                                   .split(" ")[0] # 僅取第一個單詞
+            # 中文名映射
+            name_map = {"2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2382": "廣達", "2603": "長榮", "3231": "緯創", "2303": "聯電"}
+            display_name = name_map.get(symbol.split(".")[0], info.get('shortName', symbol))
 
             results.append({
                 "代碼": symbol.replace(".TW", ""),
-                "股票名稱": display_name,
-                "目前現價": round(current_price, 2),
-                "短線目標": round(short_target, 2),
-                "長線預估": round(long_target, 2),
-                "今日成交張數": int(volume_shares),
-                "飆股推薦": "🚀 推薦短期飆股" if (is_strong_k and current_price >= high_20d) else "一般走勢"
+                "名稱": display_name,
+                "現價": round(current_p, 1),
+                "短線預期": round(short_t, 1),
+                "長線預估": round(long_t, 1),
+                "今日張數": int(vol_shares),
+                "狀態": "🚀 推薦飆股" if is_surging else "多頭排列" if (ma5 > ma20) else "整理中"
             })
-        except:
-            pass
-        progress_bar.progress((i + 1) / len(taiwan_stocks))
+        except: pass
+        progress_bar.progress((i + 1) / len(stock_list))
     
     progress_bar.empty()
     return pd.DataFrame(results)
 
-# --- 介面呈現 ---
-if st.button("🔍 開始全自動掃描 (含飆股篩選)", use_container_width=True):
-    data = analyze_market()
-    
-    if not data.empty:
-        # 1. 顯示飆股專區
-        st.subheader("🔥 推薦短期飆股專區 (成交量 > 2萬 + 強勢K線)")
-        hot_stocks = data[data['飆股推薦'] == "🚀 推薦短期飆股"]
-        if not hot_stocks.empty:
-            st.success(f"偵測到 {len(hot_stocks)} 檔符合爆發型態標的！")
-            st.dataframe(hot_stocks, hide_index=True, use_container_width=True)
-        else:
-            st.info("目前大盤整理中，尚未出現符合「短期飆股」型態的個股。")
-        
-        st.divider()
-        
-        # 2. 顯示所有標的
-        st.subheader("📊 所有監測標的行情預測")
-        st.dataframe(
-            data.sort_values(by="今日成交張數", ascending=False), 
-            hide_index=True, 
-            use_container_width=True
-        )
+# --- 4. 網頁介面展示 ---
+# 每日新聞看板
+st.subheader("🌐 AI 每日財經快訊與影響預測")
+with st.expander("📌 點擊展開今日 AI 深度新聞分析", expanded=True):
+    if st.button("🔄 更新 AI 新聞分析"):
+        ai_news = get_ai_market_intelligence()
+        st.write(ai_news)
     else:
-        st.warning("查無符合成交量門檻的標的。")
+        st.write("點擊按鈕獲取今日 AI 財經解讀。")
 
 st.divider()
-st.caption("💡 飆股小知識：本系統推薦之標的需符合「帶量突破」與「均線多頭排列」之技術面，適合短線操作。")
+
+# 側邊欄設定
+with st.sidebar:
+    st.header("⚙️ 篩選設定")
+    vol_input = st.number_input("最低成交量門檻 (張)", value=20000)
+    stock_pool = [
+        "2330.TW", "2317.TW", "2454.TW", "2382.TW", "3231.TW", "2301.TW", 
+        "2357.TW", "6669.TW", "2603.TW", "2609.TW", "2618.TW", "2881.TW", 
+        "2882.TW", "1513.TW", "1605.TW", "3034.TW", "2376.TW", "2303.TW"
+    ]
+
+# 執行選股
+if st.button("🔍 執行全自動市場掃描", use_container_width=True):
+    final_data = run_full_scan(vol_input, stock_pool)
+    
+    if not final_data.empty:
+        # 飆股專區
+        st.subheader("🔥 本日推薦短期飆股 (帶量突破型)")
+        surging_df = final_data[final_data['狀態'] == "🚀 推薦飆股"]
+        if not surging_df.empty:
+            st.success(f"發現 {len(surging_df)} 檔爆發標的！")
+            st.dataframe(surging_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("今日無標的符合飆股爆發型態。")
+            
+        # 完整列表
+        st.subheader("📊 監控池完整分析預測")
+        st.dataframe(final_data.sort_values(by="今日張數", ascending=False), hide_index=True, use_container_width=True)
+    else:
+        st.warning("查無符合門檻之標的。")
+
+st.divider()
+st.caption("💡 提示：AI 新聞分析會根據當前世界動態，自動判斷『受惠標的』與『受害標的』。")
